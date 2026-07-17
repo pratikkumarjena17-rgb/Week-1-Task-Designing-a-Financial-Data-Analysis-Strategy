@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { StrategyReport, FinancialMetric } from "../types";
+import Papa from "papaparse";
 import { 
   FileText, 
   Download, 
@@ -12,7 +13,10 @@ import {
   Sparkles, 
   Copy, 
   FileCode,
-  Info
+  Info,
+  Upload,
+  FileSpreadsheet,
+  AlertCircle
 } from "lucide-react";
 
 interface StrategyEditorProps {
@@ -45,6 +49,185 @@ export default function StrategyEditor({
   });
 
   const [copied, setCopied] = useState(false);
+
+  // CSV Drag and Drop state
+  const [isDragActive, setIsDragActive] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCsvUpload = (file: File) => {
+    setIsParsing(true);
+    setCsvError(null);
+    setSuccessMessage(null);
+
+    Papa.parse(file, {
+      header: true,
+      dynamicTyping: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        try {
+          if (!results.data || results.data.length === 0) {
+            throw new Error("The CSV file appears to be empty or has no rows of data.");
+          }
+
+          const headers = results.meta.fields || [];
+          if (headers.length === 0) {
+            const firstRow = results.data[0] as any;
+            if (firstRow) {
+              results.meta.fields = Object.keys(firstRow);
+            } else {
+              throw new Error("Unable to read headers or columns from the CSV.");
+            }
+          }
+
+          const parsedHeaders = results.meta.fields || [];
+          const nonMetricKeywords = ["id", "date", "time", "month", "year", "quarter", "index", "user", "name", "timestamp", "unnamed", "status", "category", "location", "country", "city", "description"];
+          
+          const detectedMetrics: FinancialMetric[] = [];
+
+          parsedHeaders.forEach(header => {
+            const cleanHeader = header.trim();
+            if (!cleanHeader) return;
+            const lowerHeader = cleanHeader.toLowerCase();
+
+            // Skip non-metric administrative columns
+            if (nonMetricKeywords.some(keyword => lowerHeader.includes(keyword))) {
+              return;
+            }
+
+            // Gather column values to calculate stats
+            const values: number[] = [];
+            results.data.forEach((row: any) => {
+              const val = row[header];
+              if (typeof val === "number" && !isNaN(val)) {
+                values.push(val);
+              } else if (typeof val === "string") {
+                const num = parseFloat(val.replace(/[^0-9.-]/g, ""));
+                if (!isNaN(num)) {
+                  values.push(num);
+                }
+              }
+            });
+
+            // Only treat as metric if we have some numeric data in this column
+            if (values.length > 0) {
+              const min = Math.min(...values);
+              const max = Math.max(...values);
+              const avg = values.reduce((sum, v) => sum + v, 0) / values.length;
+
+              // Determine Category
+              let category: "Profitability" | "Liquidity" | "Efficiency" | "Growth" | "SaaS" = "Profitability";
+              if (lowerHeader.includes("revenue") || lowerHeader.includes("sales") || lowerHeader.includes("growth") || lowerHeader.includes("arr") || lowerHeader.includes("mrr") || lowerHeader.includes("billing")) {
+                category = "Growth";
+              } else if (lowerHeader.includes("expense") || lowerHeader.includes("cost") || lowerHeader.includes("opex") || lowerHeader.includes("cogs") || lowerHeader.includes("tax") || lowerHeader.includes("bill")) {
+                category = "Efficiency";
+              } else if (lowerHeader.includes("margin") || lowerHeader.includes("profit") || lowerHeader.includes("ebitda") || lowerHeader.includes("net") || lowerHeader.includes("income")) {
+                category = "Profitability";
+              } else if (lowerHeader.includes("ltv") || lowerHeader.includes("cac") || lowerHeader.includes("churn") || lowerHeader.includes("retention") || lowerHeader.includes("nrr")) {
+                category = "SaaS";
+              } else if (lowerHeader.includes("cash") || lowerHeader.includes("liquidity") || lowerHeader.includes("runway") || lowerHeader.includes("burn") || lowerHeader.includes("capital")) {
+                category = "Liquidity";
+              }
+
+              // Format stats for benchmark range
+              let rangeString = "";
+              let formattedAvg = "";
+              if (lowerHeader.includes("margin") || lowerHeader.includes("rate") || lowerHeader.includes("percent") || lowerHeader.includes("churn") || lowerHeader.includes("retention")) {
+                rangeString = `${min.toFixed(1)}% to ${max.toFixed(1)}%`;
+                formattedAvg = `${avg.toFixed(1)}%`;
+              } else if (lowerHeader.includes("ltv") || lowerHeader.includes("cac") || lowerHeader.includes("ratio") || lowerHeader.includes("multiple") || lowerHeader.includes("turnover")) {
+                rangeString = `${min.toFixed(2)}x to ${max.toFixed(2)}x`;
+                formattedAvg = `${avg.toFixed(2)}x`;
+              } else {
+                // Assume currency or large numbers
+                const formatNum = (n: number) => {
+                  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
+                  if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}k`;
+                  return `$${n.toFixed(0)}`;
+                };
+                rangeString = `${formatNum(min)} to ${formatNum(max)}`;
+                formattedAvg = formatNum(avg);
+              }
+
+              // Python Calculations Snippet
+              let pythonSnippet = "";
+              const safeVarName = cleanHeader.replace(/[^a-zA-Z0-9]/g, "_");
+              if (category === "Profitability") {
+                pythonSnippet = `# Calculate profitability metrics in Pandas\ndf['${safeVarName}_Margin'] = (df['${cleanHeader}'] / df['Revenue']) * 100\nprint(f"Computed average ${cleanHeader} margin: {df['${safeVarName}_Margin'].mean():.2f}%")`;
+              } else if (category === "Growth") {
+                pythonSnippet = `# Compute vectorized growth velocity using NumPy\ndf['${safeVarName}_PctChange'] = df['${cleanHeader}'].pct_change() * 100\nprint(f"Mean ${cleanHeader} expansion speed: {df['${safeVarName}_PctChange'].mean():.2f}%")`;
+              } else if (category === "SaaS") {
+                pythonSnippet = `# Model SaaS metrics and customer economics\ndf['SaaS_${safeVarName}'] = df['${cleanHeader}'].astype(float)\nprint(f"SaaS metrics model compiled for ${cleanHeader}")`;
+              } else {
+                pythonSnippet = `# Clean and model raw ledger values dynamically\ndf['Cleaned_${safeVarName}'] = df['${cleanHeader}'].fillna(df['${cleanHeader}'].mean())\nprint(f"Ledger analysis for ${cleanHeader} complete (R2 fit ready)")`;
+              }
+
+              detectedMetrics.push({
+                name: cleanHeader,
+                category,
+                formula: `Calculated from [${cleanHeader}] column.`,
+                justification: `Pivotal metric parsed directly from the uploaded financial ledger file. It exhibits an empirical database average of ${formattedAvg} across ${values.length} records.`,
+                typicalRange: rangeString,
+                pythonCalculations: pythonSnippet
+              });
+            }
+          });
+
+          if (detectedMetrics.length === 0) {
+            throw new Error("No numeric columns representing financial metrics were detected. Ensure your CSV has numeric values in metric columns (e.g. Sales, Expenses, MRR, Margin).");
+          }
+
+          // Auto-merge with existing metrics, avoiding duplicates by name
+          const existingNames = new Set(report.metrics.map(m => m.name.toLowerCase()));
+          const uniqueNewMetrics = detectedMetrics.filter(m => !existingNames.has(m.name.toLowerCase()));
+
+          if (uniqueNewMetrics.length === 0) {
+            setSuccessMessage(`CSV parsed successfully (${results.data.length} rows), but all detected metrics (${detectedMetrics.map(m => m.name).join(", ")}) already exist in your strategy draft.`);
+          } else {
+            onUpdateReport({
+              ...report,
+              metrics: [...report.metrics, ...uniqueNewMetrics]
+            });
+            setSuccessMessage(`Parsed ${results.data.length} rows from "${file.name}". Automatically imported ${uniqueNewMetrics.length} new financial metric(s): ${uniqueNewMetrics.map(m => m.name).join(", ")}`);
+          }
+        } catch (err: any) {
+          setCsvError(err.message || "An error occurred while parsing the CSV file.");
+        } finally {
+          setIsParsing(false);
+        }
+      },
+      error: (err) => {
+        setCsvError(`PapaParse failed: ${err.message}`);
+        setIsParsing(false);
+      }
+    });
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragActive(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragActive(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleCsvUpload(e.dataTransfer.files[0]);
+    }
+  };
+
+  const triggerFileInput = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
 
   // Copy to clipboard
   const copyToClipboard = () => {
@@ -326,6 +509,90 @@ ${report.pythonCode}
               )}
             </div>
           </div>
+        </div>
+
+        {/* CSV Ledger Metric Auto-Detector */}
+        <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-3xs space-y-4" id="csv-ledger-parser">
+          <div className="flex items-center justify-between border-b border-gray-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <span className="p-1.5 bg-indigo-50 text-indigo-700 rounded-lg">
+                <FileSpreadsheet className="h-4.5 w-4.5" />
+              </span>
+              <div className="text-left">
+                <h3 className="font-sans font-bold text-xs text-gray-800 uppercase tracking-wider font-mono">
+                  CSV Ledger Parser & Metric Importer
+                </h3>
+                <p className="text-[10px] text-gray-500 font-sans mt-0.5">
+                  Upload a local billing ledger or financial metrics file to automatically extract columns as strategic metrics.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Drag & Drop Area */}
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onClick={triggerFileInput}
+            className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition flex flex-col items-center justify-center space-y-2.5 ${
+              isDragActive
+                ? "border-indigo-500 bg-indigo-50/50"
+                : "border-gray-300 hover:border-indigo-400 hover:bg-gray-50/30"
+            }`}
+          >
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={(e) => {
+                if (e.target.files && e.target.files[0]) {
+                  handleCsvUpload(e.target.files[0]);
+                }
+              }}
+              accept=".csv"
+              className="hidden"
+            />
+
+            {isParsing ? (
+              <div className="flex flex-col items-center space-y-2 py-2">
+                <div className="animate-spin rounded-full h-7 w-7 border-b-2 border-indigo-600"></div>
+                <span className="text-xs font-semibold text-indigo-700">PapaParse is reading and modeling ledger rows...</span>
+              </div>
+            ) : (
+              <>
+                <Upload className={`h-8 w-8 ${isDragActive ? "text-indigo-600 scale-110" : "text-gray-400"} transition-all`} />
+                <div className="space-y-1">
+                  <p className="text-xs font-bold text-gray-700">
+                    Drag and drop your local financial CSV here, or <span className="text-indigo-600 underline hover:text-indigo-700">browse</span>
+                  </p>
+                  <p className="text-[10px] text-gray-500 font-mono leading-normal">
+                    Supports columns like Revenue, Sales, CAC, MRR, Operating Costs, Margins, etc.
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Success or Error Alert Message */}
+          {csvError && (
+            <div className="flex items-start gap-2.5 p-3 rounded-lg bg-rose-50 border border-rose-100 text-rose-900 text-xs">
+              <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold block text-rose-950 font-mono uppercase tracking-wide text-[10px]">Parser Error</span>
+                <p className="text-rose-700 font-sans leading-normal mt-0.5">{csvError}</p>
+              </div>
+            </div>
+          )}
+
+          {successMessage && (
+            <div className="flex items-start gap-2.5 p-3.5 rounded-lg bg-emerald-50 border border-emerald-100 text-emerald-950 text-xs">
+              <Check className="h-4.5 w-4.5 text-emerald-600 shrink-0 mt-0.5 p-0.5 bg-emerald-100 rounded-full" />
+              <div className="space-y-1">
+                <span className="font-bold text-emerald-900 font-mono uppercase tracking-wide text-[10px]">Success! Strategy report updated</span>
+                <p className="text-emerald-800 font-sans leading-relaxed text-[11px] whitespace-pre-wrap">{successMessage}</p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Section 1: Executive Summary */}
