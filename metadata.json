@@ -1,0 +1,6 @@
+{
+  "name": "Financial Data Analysis Strategy & Simulator",
+  "description": "An interactive plan builder, strategy visualizer, and code simulator for designing financial data analysis strategies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
